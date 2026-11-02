@@ -222,8 +222,17 @@ async fn handle(
 
         if let Some(h) = chosen {
             let mid = find_str(&payload, "sdpMid").unwrap_or_else(|| "0".to_string());
-            log::info!("remote candidate {}", truncate(&cand, 90));
-            h.add_remote_candidate(&cand, &mid).await.ok();
+            let idx = find_str(&payload, "sdpMLineIndex");
+            log::info!(
+                "remote candidate mid={} idx={:?} {}",
+                mid,
+                idx,
+                truncate(&cand, 70)
+            );
+            match h.add_remote_candidate(&cand, &mid).await {
+                Ok(()) => log::info!("  candidate accepted on mid={}", mid),
+                Err(e) => log::warn!("  add_ice_candidate failed: {}", e),
+            }
         } else {
             log::info!("candidate before session, dropped");
         }
