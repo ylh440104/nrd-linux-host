@@ -156,6 +156,7 @@ fn walk(v: &Value, key: &str, depth: usize) -> Option<Value> {
 
 pub struct Host {
     pub pc: Arc<RTCPeerConnection>,
+    pub gathered: Arc<tokio::sync::Mutex<Vec<String>>>,
     video: Arc<TrackLocalStaticSample>,
 }
 
@@ -215,17 +216,23 @@ impl Host {
             },
         ));
 
-        pc.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
-            Box::pin(async move {
-                if let Some(c) = c {
-                    let text = c.to_json().map(|j| j.candidate).unwrap_or_default();
-                    log::info!("local candidate {}", text);
-                }
-            })
-        }));
+        let gathered = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        {
+            let store = gathered.clone();
+            pc.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
+                let store = store.clone();
+                Box::pin(async move {
+                    if let Some(c) = c {
+                        let text = c.to_json().map(|j| j.candidate).unwrap_or_default();
+                        log::info!("local candidate {}", text);
+                        store.lock().await.push(text);
+                    }
+                })
+            }));
+        }
 
         let _ = (display, fps, size);
-        Ok(Self { pc, video })
+        Ok(Self { pc, gathered, video })
     }
 
     pub async fn answer(&self, offer_sdp: &str) -> Result<String> {
@@ -249,28 +256,19 @@ impl Host {
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
-        // Candidates are gathered asynchronously. Wait for the gatherer to
-        // finish so the SDP we hand back actually contains our relay address;
-        // otherwise the peer has nothing to send checks to.
-        let mut gather_done = self.pc.gathering_complete_promise().await;
-        match tokio::time::timeout(std::time::Duration::from_secs(12), gather_done.recv()).await {
-            Ok(_) => log::info!("ice gathering complete"),
-            Err(_) => log::warn!("ice gathering timed out, using whatever we have"),
-        }
-
+        // Answer immediately so the phone does not time out waiting.
+        // Candidates are sent separately via trickle once gathered.
         let local = self
             .pc
             .local_description()
             .await
             .ok_or_else(|| anyhow!("no local description"))?;
 
-        let candidates = local.sdp.matches("a=candidate:").count();
         log::info!(
-            "answer shape: mlines={} ufrag={:?} pwd_len={:?} candidates={}",
+            "answer shape: mlines={} ufrag={:?} candidates={}",
             local.sdp.matches("m=").count(),
             attribute(&local.sdp, "a=ice-ufrag:"),
-            attribute(&local.sdp, "a=ice-pwd:").map(|v| v.len()),
-            candidates
+            local.sdp.matches("a=candidate:").count()
         );
         Ok(local.sdp)
     }
@@ -467,5 +465,18 @@ pub fn answer_payload(meta: &SessionMeta, sdp: &str) -> Value {
         "sdp": sdp,
         "type": "answer",
         "ice_network_type": 3,
+    })
+}
+
+pub fn candidate_payload(meta: &SessionMeta, cand: &str, mid: &str) -> Value {
+    json!({
+        "app_control_id": meta.app_control_id,
+        "ice_id": meta.ice_id,
+        "candidate": {
+            "candidate": cand,
+            "sdpMLineIndex": 0,
+            "sdpMid": mid,
+        },
+        "type": "candidate",
     })
 }

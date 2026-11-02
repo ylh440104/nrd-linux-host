@@ -265,6 +265,10 @@ async fn start_session(
     ctx.sig.emit("soac", talk).await?;
     log::info!("answer sent ({} bytes)", answer.len());
 
+    // The phone sends its candidates via trickle, so ours must be trickled too
+    // in case they are not present in the SDP we just sent.
+    trickle_candidates(ctx, &meta, h.clone()).await;
+
     let h2 = h.clone();
     tokio::spawn(async move {
         loop {
@@ -333,5 +337,22 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..n])
+    }
+}
+
+async fn trickle_candidates(
+    ctx: &mut Ctx,
+    meta: &host::SessionMeta,
+    h: Arc<host::Host>,
+) {
+    let cands = h.gathered.lock().await.clone();
+    log::info!("trickling {} local candidates", cands.len());
+
+    for c in cands {
+        let payload = host::candidate_payload(meta, &c, "0");
+        if let Err(e) = ctx.sig.emit("soac", payload).await {
+            log::warn!("trickle failed: {}", e);
+            break;
+        }
     }
 }
