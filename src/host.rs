@@ -264,10 +264,6 @@ impl Host {
         let offer = RTCSessionDescription::offer(offer_sdp.to_owned())?;
         self.pc.set_remote_description(offer).await?;
 
-        // webrtc-ice spawns ChannelBind asynchronously and does not await it,
-        // so the first probes race ahead of the binding and get dropped by the
-        // TURN server. Pause briefly so binding can settle first.
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
 
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
@@ -347,6 +343,13 @@ fn build_ice_servers(meta: &SessionMeta) -> Vec<RTCIceServer> {
         if spec.is_turn() {
             if spec.username.is_empty() || spec.credential.is_empty() {
                 log::warn!("turn without credentials, skipped: {}", spec.urls);
+                skipped += 1;
+                continue;
+            }
+            // Only keep UDP. turns: makes webrtc-rs allocate a second relay and
+            // the two allocations then interfere with each other.
+            if !spec.urls.starts_with("turn:") || !spec.urls.contains("transport=udp") {
+                log::info!("turn non-udp skipped: {}", spec.urls);
                 skipped += 1;
                 continue;
             }
