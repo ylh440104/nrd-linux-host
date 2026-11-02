@@ -48,30 +48,28 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
     if let Some(v) = find_key(root, "iceServers") {
         if let Some(arr) = v.as_array() {
             for item in arr {
-                let urls = item
-                    .get("urls")
-                    .and_then(|u| u.as_str())
-                    .unwrap_or_default()
-                    .to_string();
-                if urls.is_empty() {
-                    if let Some(list) = item.get("urls").and_then(|u| u.as_array()) {
-                        for u in list {
-                            if let Some(s) = u.as_str() {
-                                meta.ice_servers.push(RTCIceServerSpec {
-                                    urls: s.to_string(),
-                                    username: str_of(item, "username"),
-                                    credential: str_of(item, "credential"),
-                                });
-                            }
+                let single = item.get("urls").and_then(|u| u.as_str());
+                if let Some(url) = single {
+                    if !url.is_empty() {
+                        meta.ice_servers.push(RTCIceServerSpec {
+                            urls: url.to_string(),
+                            username: str_of(item, "username"),
+                            credential: str_of(item, "credential"),
+                        });
+                    }
+                    continue;
+                }
+                if let Some(list) = item.get("urls").and_then(|u| u.as_array()) {
+                    for u in list {
+                        if let Some(s) = u.as_str() {
+                            meta.ice_servers.push(RTCIceServerSpec {
+                                urls: s.to_string(),
+                                username: str_of(item, "username"),
+                                credential: str_of(item, "credential"),
+                            });
                         }
-                        continue;
                     }
                 }
-                meta.ice_servers.push(RTCIceServerSpec {
-                    urls,
-                    username: str_of(item, "username"),
-                    credential: str_of(item, "credential"),
-                });
             }
         }
     }
@@ -102,44 +100,48 @@ fn str_of(v: &Value, key: &str) -> String {
     v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
 }
 
-/// Depth-limited search for a key anywhere in the tree.
-fn find_key<'a>(root: &'a Value, key: &str) -> Option<&'a Value> {
-    fn walk<'a>(v: &'a Value, key: &str, depth: usize) -> Option<&'a Value> {
-        if depth > 8 {
-            return None;
-        }
-        match v {
-            Value::Object(map) => {
-                if let Some(found) = map.get(key) {
+/// Depth-limited search for a key anywhere in an already-parsed tree.
+///
+/// Returns an owned copy because some payloads hide json inside a string
+/// ("streamer_data"), and that inner tree has a shorter lifetime.
+fn find_key(root: &Value, key: &str) -> Option<Value> {
+    walk(root, key, 0)
+}
+
+fn walk(v: &Value, key: &str, depth: usize) -> Option<Value> {
+    if depth > 8 {
+        return None;
+    }
+    match v {
+        Value::Object(map) => {
+            if let Some(found) = map.get(key) {
+                return Some(found.clone());
+            }
+            for (_, child) in map {
+                if let Some(found) = walk(child, key, depth + 1) {
                     return Some(found);
                 }
-                for (_, child) in map {
-                    if let Some(found) = walk(child, key, depth + 1) {
+            }
+            // Some payloads embed json as a string inside "streamer_data".
+            if let Some(s) = map.get("streamer_data").and_then(|x| x.as_str()) {
+                if let Ok(inner) = serde_json::from_str::<Value>(s) {
+                    if let Some(found) = walk(&inner, key, depth + 1) {
                         return Some(found);
                     }
                 }
-                // JSON embedded as a string
-                if let Some(s) = map.get("streamer_data").and_then(|x| x.as_str()) {
-                    if let Ok(inner) = serde_json::from_str::<Value>(s) {
-                        if let Some(found) = walk(&inner, key, depth + 1) {
-                            return Some(found);
-                        }
-                    }
-                }
-                None
             }
-            Value::Array(items) => {
-                for child in items {
-                    if let Some(found) = walk(child, key, depth + 1) {
-                        return Some(found);
-                    }
-                }
-                None
-            }
-            _ => None,
+            None
         }
+        Value::Array(items) => {
+            for child in items {
+                if let Some(found) = walk(child, key, depth + 1) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        _ => None,
     }
-    walk(root, key, 0)
 }
 
 pub struct Host {
@@ -185,7 +187,8 @@ impl Host {
         };
         if meta.force_relay {
             log::info!("force_relay set -> policy Relay");
-            cfg.ice_transport_policy = webrtc::ice_transport::ice_transport_policy::RTCIceTransportPolicy::Relay;
+            cfg.ice_transport_policy =
+                webrtc::peer_connection::configuration::RTCIceTransportPolicy::Relay;
         }
 
         let pc = Arc::new(api.new_peer_connection(cfg).await?);
@@ -233,7 +236,11 @@ impl Host {
         pc.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
             Box::pin(async move {
                 if let Some(c) = c {
-                    log::info!("local candidate {}", c.to_json().await.map(|j| j.candidate).unwrap_or_default());
+                    let text = c
+                        .to_json()
+                        .map(|j| j.candidate)
+                        .unwrap_or_default();
+                    log::info!("local candidate {}", text);
                 }
             })
         }));
@@ -267,6 +274,7 @@ impl Host {
             sdp_mline_index: Some(0),
             username_fragment: None,
         };
+        // webrtc 0.11 returns Result here, not a future.
         self.pc.add_ice_candidate(init).await?;
         Ok(())
     }

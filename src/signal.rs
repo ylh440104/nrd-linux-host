@@ -87,14 +87,16 @@ impl Signal {
     }
 
     pub async fn emit(&mut self, event: &str, payload: Value) -> Result<()> {
-        let frame = format!("42{}", serde_json::to_string(&vec![event, payload])?);
+        let arr = Value::Array(vec![Value::String(event.to_string()), payload]);
+        let frame = format!("42{}", serde_json::to_string(&arr)?);
         self.ws.send(Message::Text(frame.into())).await?;
         Ok(())
     }
 
     /// Send a binary binary-attachment frame ("45<n>-" + json).
     pub async fn emit_binary(&mut self, event: &str, payload: Value) -> Result<()> {
-        let body = serde_json::to_string(&vec![event, payload])?;
+        let arr = Value::Array(vec![Value::String(event.to_string()), payload]);
+        let body = serde_json::to_string(&arr)?;
         let mut frame = format!("45{}-", body.len()).into_bytes();
         frame.extend_from_slice(body.as_bytes());
         self.ws.send(Message::Binary(frame.into())).await?;

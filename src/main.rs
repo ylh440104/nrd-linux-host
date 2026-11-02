@@ -214,7 +214,7 @@ async fn start_session(
     tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let s = h2.pc.ice_connection_state().await;
+            let s = h2.pc.ice_connection_state();
             log::info!("probe: ice={:?}", s);
             if matches!(
                 s,
