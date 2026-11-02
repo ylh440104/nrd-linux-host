@@ -237,6 +237,12 @@ impl Host {
             attribute(offer_sdp, "a=group:BUNDLE")
         );
 
+        for line in offer_sdp.lines() {
+            if line.starts_with("a=candidate:") || line.starts_with("a=end-of-candidates") {
+                log::info!("offer cand: {}", line);
+            }
+        }
+
         let offer = RTCSessionDescription::offer(offer_sdp.to_owned())?;
         self.pc.set_remote_description(offer).await?;
 
