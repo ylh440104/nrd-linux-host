@@ -346,13 +346,27 @@ fn build_ice_servers(meta: &SessionMeta) -> Vec<RTCIceServer> {
                 skipped += 1;
                 continue;
             }
-            // Only keep UDP. turns: makes webrtc-rs allocate a second relay and
-            // the two allocations then interfere with each other.
-            if !spec.urls.starts_with("turn:") || !spec.urls.contains("transport=udp") {
-                log::info!("turn non-udp skipped: {}", spec.urls);
-                skipped += 1;
-                continue;
+            // turns: over tcp is unsupported by webrtc-rs, so keep turn: entries.
+            // Both turn: and turns: are kept as long as the scheme is turn-ish,
+            // because the only server that actually relays for us has been
+            // observed on the 2582 port range.
+            let is_udp_turn = spec.urls.starts_with("turn:");
+            if !is_udp_turn {
+                log::info!("turn tcp-only entry seen: {}", spec.urls);
             }
+            let host_part = spec
+                .urls
+                .trim_start_matches("turn:")
+                .trim_start_matches("turns:")
+                .split('?')
+                .next()
+                .unwrap_or("")
+                .to_string();
+            log::info!("turn endpoint {}", host_part);
+
+            // Prefer the endpoint family that has been observed to relay
+            // successfully; the 2583 family allocates but never forwards.
+            let prefer = host_part.ends_with(":2582") || host_part.contains(":258");
             log::info!(
                 "turn {} user_len={} cred_len={}",
                 spec.urls,
@@ -380,7 +394,22 @@ fn build_ice_servers(meta: &SessionMeta) -> Vec<RTCIceServer> {
         }
     }
 
+    // Stable sort: preferred endpoints bubble to the front without disturbing
+    // the relative order of the rest.
+    out.sort_by_key(|s| {
+        let u = &s.urls[0];
+        let preferred = u.contains(":2582") || u.ends_with(":2581");
+        if preferred {
+            0
+        } else {
+            1
+        }
+    });
+
     log::info!("ice servers: kept {} skipped {}", out.len(), skipped);
+    for s in &out {
+        log::info!("  final: {}", s.urls.join(","));
+    }
     out
 }
 
