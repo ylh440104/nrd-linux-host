@@ -228,16 +228,23 @@ impl Host {
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
+        // Candidates are gathered asynchronously. Wait for the gatherer to
+        // finish so the SDP we hand back actually contains our relay address;
+        // otherwise the peer has nothing to send checks to.
+        let mut gather_done = self.pc.gathering_complete_promise().await;
+        match tokio::time::timeout(std::time::Duration::from_secs(12), gather_done.recv()).await {
+            Ok(_) => log::info!("ice gathering complete"),
+            Err(_) => log::warn!("ice gathering timed out, using whatever we have"),
+        }
+
         let local = self
             .pc
             .local_description()
             .await
             .ok_or_else(|| anyhow!("no local description"))?;
 
-        log::info!(
-            "answer built, inline candidates {}",
-            local.sdp.matches("a=candidate:").count()
-        );
+        let candidates = local.sdp.matches("a=candidate:").count();
+        log::info!("answer built, inline candidates {}", candidates);
         Ok(local.sdp)
     }
 
