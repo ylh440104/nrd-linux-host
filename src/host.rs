@@ -253,6 +253,11 @@ impl Host {
         let offer = RTCSessionDescription::offer(offer_sdp.to_owned())?;
         self.pc.set_remote_description(offer).await?;
 
+        // webrtc-ice spawns ChannelBind asynchronously and does not await it,
+        // so the first probes race ahead of the binding and get dropped by the
+        // TURN server. Pause briefly so binding can settle first.
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
