@@ -8,6 +8,7 @@ use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
 use webrtc::api::APIBuilder;
 use webrtc::ice_transport::ice_candidate::{RTCIceCandidate, RTCIceCandidateInit};
+use webrtc::ice_transport::ice_credential_type::RTCIceCredentialType;
 use webrtc::ice_transport::ice_server::RTCIceServer;
 use webrtc::interceptor::registry::Registry;
 use webrtc::peer_connection::configuration::RTCConfiguration;
@@ -285,12 +286,18 @@ fn build_ice_servers(meta: &SessionMeta) -> Vec<RTCIceServer> {
                 skipped += 1;
                 continue;
             }
-            log::info!("turn {}", spec.urls);
+            log::info!(
+                "turn {} user_len={} cred_len={}",
+                spec.urls,
+                spec.username.len(),
+                spec.credential.len()
+            );
             out.push(RTCIceServer {
                 urls: vec![spec.urls.clone()],
                 username: spec.username.clone(),
                 credential: spec.credential.clone(),
-                ..Default::default()
+                // Default is Unspecified, which webrtc-rs rejects for turn.
+                credential_type: RTCIceCredentialType::Password,
             });
         } else if spec.is_stun() {
             log::info!("stun {}", spec.urls);
@@ -298,7 +305,7 @@ fn build_ice_servers(meta: &SessionMeta) -> Vec<RTCIceServer> {
                 urls: vec![spec.urls.clone()],
                 username: String::new(),
                 credential: String::new(),
-                ..Default::default()
+                credential_type: RTCIceCredentialType::Unspecified,
             });
         } else {
             log::warn!("unknown scheme, skipped: {}", spec.urls);
