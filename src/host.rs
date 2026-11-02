@@ -78,17 +78,14 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
         meta.force_relay = v.as_bool().unwrap_or(false);
     }
     meta.app_control_id = find_key(root, "app_control_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
     meta.ice_id = find_key(root, "ice_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
     meta.client_id = find_key(root, "client_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .unwrap_or_default();
 
     if meta.ice_servers.is_empty() {
         return None;
@@ -187,8 +184,7 @@ impl Host {
         };
         if meta.force_relay {
             log::info!("force_relay set -> policy Relay");
-            cfg.ice_transport_policy =
-                webrtc::peer_connection::configuration::RTCIceTransportPolicy::Relay;
+            cfg.ice_transport_policy = webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy::Relay;
         }
 
         let pc = Arc::new(api.new_peer_connection(cfg).await?);
