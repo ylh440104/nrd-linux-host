@@ -256,8 +256,24 @@ impl Host {
         let answer = self.pc.create_answer(None).await?;
         self.pc.set_local_description(answer).await?;
 
-        // Answer immediately so the phone does not time out waiting.
-        // Candidates are sent separately via trickle once gathered.
+        // Wait for at least one candidate before answering: the phone is on
+        // trickle and will not learn our relay address otherwise.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(6);
+        loop {
+            {
+                let got = self.gathered.lock().await;
+                if !got.is_empty() {
+                    log::info!("candidates ready: {}", got.len());
+                    break;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                log::warn!("no candidate after 6s, answering anyway");
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        }
+
         let local = self
             .pc
             .local_description()
