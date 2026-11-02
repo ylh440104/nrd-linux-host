@@ -1,0 +1,42 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config libssl-dev
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --verbose 2>&1 | tail -200
+
+      - name: Check binary
+        run: ls -la target/release/nrdhost && file target/release/nrdhost
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nrdhost-linux-x86_64
+          path: target/release/nrdhost
+          if-no-files-found: error
+          retention-days: 7
