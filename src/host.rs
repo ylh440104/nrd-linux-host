@@ -101,6 +101,13 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
     Some(meta)
 }
 
+/// Read a single-line SDP attribute value.
+fn attribute(sdp: &str, prefix: &str) -> Option<String> {
+    sdp.lines()
+        .find(|l| l.trim_start().starts_with(prefix))
+        .map(|l| l.trim_start()[prefix.len()..].trim().to_string())
+}
+
 fn str_of(v: &Value, key: &str) -> String {
     v.get(key)
         .and_then(|x| x.as_str())
@@ -222,6 +229,14 @@ impl Host {
     }
 
     pub async fn answer(&self, offer_sdp: &str) -> Result<String> {
+        log::info!(
+            "offer shape: mlines={} ufrag={:?} pwd_len={:?} bundle={:?}",
+            offer_sdp.matches("m=").count(),
+            attribute(offer_sdp, "a=ice-ufrag:"),
+            attribute(offer_sdp, "a=ice-pwd:").map(|v| v.len()),
+            attribute(offer_sdp, "a=group:BUNDLE")
+        );
+
         let offer = RTCSessionDescription::offer(offer_sdp.to_owned())?;
         self.pc.set_remote_description(offer).await?;
 
@@ -244,7 +259,13 @@ impl Host {
             .ok_or_else(|| anyhow!("no local description"))?;
 
         let candidates = local.sdp.matches("a=candidate:").count();
-        log::info!("answer built, inline candidates {}", candidates);
+        log::info!(
+            "answer shape: mlines={} ufrag={:?} pwd_len={:?} candidates={}",
+            local.sdp.matches("m=").count(),
+            attribute(&local.sdp, "a=ice-ufrag:"),
+            attribute(&local.sdp, "a=ice-pwd:").map(|v| v.len()),
+            candidates
+        );
         Ok(local.sdp)
     }
 
