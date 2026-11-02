@@ -98,6 +98,17 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
     if meta.ice_servers.is_empty() {
         return None;
     }
+
+    // Keep the last announcement on disk so an external probe can replay it.
+    let dump: Vec<Value> = meta
+        .ice_servers
+        .iter()
+        .map(|s| json!({"urls": s.urls, "username": s.username, "credential": s.credential}))
+        .collect();
+    if let Ok(text) = serde_json::to_string_pretty(&dump) {
+        let _ = std::fs::write("/root/nrdlog/ice_servers.json", text);
+    }
+
     Some(meta)
 }
 
