@@ -3,7 +3,6 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::mpsc::UnboundedSender;
 
 use webrtc::api::interceptor_registry::register_default_interceptors;
 use webrtc::api::media_engine::{MediaEngine, MIME_TYPE_H264};
@@ -22,26 +21,33 @@ use webrtc::track::track_local::TrackLocal;
 /// Parsed view of the "be-controlled" payload.
 #[derive(Debug, Default, Clone)]
 pub struct SessionMeta {
-    pub ice_servers: Vec<RTCIceServerSpec>,
+    pub ice_servers: Vec<IceServerSpec>,
     pub force_relay: bool,
     pub app_control_id: String,
     pub ice_id: String,
     pub client_id: String,
-    pub source: String,
 }
 
 #[derive(Debug, Clone)]
-pub struct RTCIceServerSpec {
+pub struct IceServerSpec {
     pub urls: String,
     pub username: String,
     pub credential: String,
 }
 
+impl IceServerSpec {
+    fn is_turn(&self) -> bool {
+        let base = self.urls.split('?').next().unwrap_or(&self.urls);
+        base.starts_with("turn:") || base.starts_with("turns:")
+    }
+
+    fn is_stun(&self) -> bool {
+        let base = self.urls.split('?').next().unwrap_or(&self.urls);
+        base.starts_with("stun:")
+    }
+}
+
 /// Walk an arbitrary json tree looking for the iceServers array.
-///
-/// The server has sent this payload in several shapes over time (text event,
-/// binary attachment, nested inside "streamer_data" as a string), so a
-/// structural search is more reliable than a fixed path.
 pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
     let mut meta = SessionMeta::default();
 
@@ -51,7 +57,7 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
                 let single = item.get("urls").and_then(|u| u.as_str());
                 if let Some(url) = single {
                     if !url.is_empty() {
-                        meta.ice_servers.push(RTCIceServerSpec {
+                        meta.ice_servers.push(IceServerSpec {
                             urls: url.to_string(),
                             username: str_of(item, "username"),
                             credential: str_of(item, "credential"),
@@ -62,7 +68,7 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
                 if let Some(list) = item.get("urls").and_then(|u| u.as_array()) {
                     for u in list {
                         if let Some(s) = u.as_str() {
-                            meta.ice_servers.push(RTCIceServerSpec {
+                            meta.ice_servers.push(IceServerSpec {
                                 urls: s.to_string(),
                                 username: str_of(item, "username"),
                                 credential: str_of(item, "credential"),
@@ -77,6 +83,7 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
     if let Some(v) = find_key(root, "force_relay") {
         meta.force_relay = v.as_bool().unwrap_or(false);
     }
+
     meta.app_control_id = find_key(root, "app_control_id")
         .and_then(|v| v.as_str().map(str::to_owned))
         .unwrap_or_default();
@@ -94,13 +101,12 @@ pub fn extract_meta(root: &Value) -> Option<SessionMeta> {
 }
 
 fn str_of(v: &Value, key: &str) -> String {
-    v.get(key).and_then(|x| x.as_str()).unwrap_or_default().to_string()
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
-/// Depth-limited search for a key anywhere in an already-parsed tree.
-///
-/// Returns an owned copy because some payloads hide json inside a string
-/// ("streamer_data"), and that inner tree has a shorter lifetime.
 fn find_key(root: &Value, key: &str) -> Option<Value> {
     walk(root, key, 0)
 }
@@ -119,7 +125,6 @@ fn walk(v: &Value, key: &str, depth: usize) -> Option<Value> {
                     return Some(found);
                 }
             }
-            // Some payloads embed json as a string inside "streamer_data".
             if let Some(s) = map.get("streamer_data").and_then(|x| x.as_str()) {
                 if let Ok(inner) = serde_json::from_str::<Value>(s) {
                     if let Some(found) = walk(&inner, key, depth + 1) {
@@ -149,7 +154,6 @@ pub struct Host {
 impl Host {
     pub async fn new(meta: &SessionMeta, display: &str, fps: u32, size: &str) -> Result<Self> {
         let mut media = MediaEngine::default();
-        // register_default_codecs already includes H264 baseline and VP8.
         media.register_default_codecs()?;
 
         let mut registry = Registry::new();
@@ -160,31 +164,17 @@ impl Host {
             .with_interceptor_registry(registry)
             .build();
 
-        let mut servers = Vec::new();
-        for spec in &meta.ice_servers {
-            let base = spec.urls.split('?').next().unwrap_or(&spec.urls);
-            if !(base.starts_with("turn:") || base.starts_with("turns:") || base.starts_with("stun:")) {
-                continue;
-            }
-            servers.push(RTCIceServer {
-                urls: vec![spec.urls.clone()],
-                username: spec.username.clone(),
-                credential: spec.credential.clone(),
-                ..Default::default()
-            });
-        }
-        log::info!("ice servers kept: {}", servers.len());
-        for s in &servers {
-            log::info!("  {}", s.urls.join(","));
-        }
+        let servers = build_ice_servers(meta);
 
         let mut cfg = RTCConfiguration {
             ice_servers: servers,
             ..Default::default()
         };
+
         if meta.force_relay {
-            log::info!("force_relay set -> policy Relay");
-            cfg.ice_transport_policy = webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy::Relay;
+            log::info!("force_relay -> RTCIceTransportPolicy::Relay");
+            cfg.ice_transport_policy =
+                webrtc::peer_connection::policy::ice_transport_policy::RTCIceTransportPolicy::Relay;
         }
 
         let pc = Arc::new(api.new_peer_connection(cfg).await?);
@@ -194,7 +184,8 @@ impl Host {
                 mime_type: MIME_TYPE_H264.to_owned(),
                 clock_rate: 90000,
                 channels: 0,
-                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f".to_owned(),
+                sdp_fmtp_line: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f"
+                    .to_owned(),
                 rtcp_feedback: vec![],
             },
             "video".to_owned(),
@@ -204,47 +195,31 @@ impl Host {
         let track: Arc<dyn TrackLocal + Send + Sync> = video.clone();
         pc.add_track(track).await?;
 
-        {
-            let pc2 = pc.clone();
-            pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
-                log::info!("pc state {:?}", s);
-                let pc3 = pc2.clone();
-                Box::pin(async move {
-                    if s == RTCPeerConnectionState::Connected {
-                        log::info!("ICE CONNECTED");
-                    }
-                    let _ = pc3;
-                })
-            }));
-        }
+        pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
+            log::info!("pc state {:?}", s);
+            Box::pin(async {})
+        }));
 
-        {
-            let pc2 = pc.clone();
-            pc.on_ice_connection_state_change(Box::new(
-                move |s: webrtc::ice_transport::ice_connection_state::RTCIceConnectionState| {
-                    log::info!("ice state {:?}", s);
-                    let _ = &pc2;
-                    Box::pin(async {})
-                },
-            ));
-        }
+        pc.on_ice_connection_state_change(Box::new(
+            move |s: webrtc::ice_transport::ice_connection_state::RTCIceConnectionState| {
+                log::info!("ice state {:?}", s);
+                Box::pin(async {})
+            },
+        ));
 
         pc.on_ice_candidate(Box::new(move |c: Option<RTCIceCandidate>| {
             Box::pin(async move {
                 if let Some(c) = c {
-                    let text = c
-                        .to_json()
-                        .map(|j| j.candidate)
-                        .unwrap_or_default();
+                    let text = c.to_json().map(|j| j.candidate).unwrap_or_default();
                     log::info!("local candidate {}", text);
                 }
             })
         }));
 
+        let _ = (display, fps, size);
         Ok(Self { pc, video })
     }
 
-    /// Apply the remote offer and produce our answer.
     pub async fn answer(&self, offer_sdp: &str) -> Result<String> {
         let offer = RTCSessionDescription::offer(offer_sdp.to_owned())?;
         self.pc.set_remote_description(offer).await?;
@@ -258,8 +233,10 @@ impl Host {
             .await
             .ok_or_else(|| anyhow!("no local description"))?;
 
-        let cand_count = local.sdp.matches("a=candidate:").count();
-        log::info!("answer ready, inline candidates {}", cand_count);
+        log::info!(
+            "answer built, inline candidates {}",
+            local.sdp.matches("a=candidate:").count()
+        );
         Ok(local.sdp)
     }
 
@@ -270,12 +247,10 @@ impl Host {
             sdp_mline_index: Some(0),
             username_fragment: None,
         };
-        // webrtc 0.11 returns Result here, not a future.
         self.pc.add_ice_candidate(init).await?;
         Ok(())
     }
 
-    /// Pump x11grab through ffmpeg into the H264 track.
     pub async fn spawn_video(&self, display: &str, fps: u32, size: &str) -> Result<()> {
         let video = self.video.clone();
         let display = display.to_string();
@@ -294,6 +269,47 @@ impl Host {
     }
 }
 
+/// Split the server list the way webrtc-rs expects it.
+///
+/// `turn:` / `turns:` entries are only accepted together with a username and
+/// credential; a turn URL without them makes the whole configuration invalid.
+/// `stun:` entries must NOT carry credentials.
+fn build_ice_servers(meta: &SessionMeta) -> Vec<RTCIceServer> {
+    let mut out = Vec::new();
+    let mut skipped = 0usize;
+
+    for spec in &meta.ice_servers {
+        if spec.is_turn() {
+            if spec.username.is_empty() || spec.credential.is_empty() {
+                log::warn!("turn without credentials, skipped: {}", spec.urls);
+                skipped += 1;
+                continue;
+            }
+            log::info!("turn {}", spec.urls);
+            out.push(RTCIceServer {
+                urls: vec![spec.urls.clone()],
+                username: spec.username.clone(),
+                credential: spec.credential.clone(),
+                ..Default::default()
+            });
+        } else if spec.is_stun() {
+            log::info!("stun {}", spec.urls);
+            out.push(RTCIceServer {
+                urls: vec![spec.urls.clone()],
+                username: String::new(),
+                credential: String::new(),
+                ..Default::default()
+            });
+        } else {
+            log::warn!("unknown scheme, skipped: {}", spec.urls);
+            skipped += 1;
+        }
+    }
+
+    log::info!("ice servers: kept {} skipped {}", out.len(), skipped);
+    out
+}
+
 async fn pump_once(
     track: Arc<TrackLocalStaticSample>,
     display: &str,
@@ -302,21 +318,36 @@ async fn pump_once(
 ) -> Result<()> {
     let mut child = Command::new("ffmpeg")
         .args([
-            "-loglevel", "error",
-            "-f", "x11grab",
-            "-framerate", &fps.to_string(),
-            "-video_size", size,
-            "-i", display,
-            "-vcodec", "libx264",
-            "-preset", "ultrafast",
-            "-tune", "zerolatency",
-            "-profile:v", "baseline",
-            "-pix_fmt", "yuv420p",
-            "-b:v", "1500k",
-            "-maxrate", "2000k",
-            "-bufsize", "2000k",
-            "-g", &(fps * 2).to_string(),
-            "-f", "h264",
+            "-loglevel",
+            "error",
+            "-f",
+            "x11grab",
+            "-framerate",
+            &fps.to_string(),
+            "-video_size",
+            size,
+            "-i",
+            display,
+            "-vcodec",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-profile:v",
+            "baseline",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            "1500k",
+            "-maxrate",
+            "2000k",
+            "-bufsize",
+            "2000k",
+            "-g",
+            &(fps * 2).to_string(),
+            "-f",
+            "h264",
             "pipe:1",
         ])
         .stdout(std::process::Stdio::piped())
@@ -329,7 +360,7 @@ async fn pump_once(
 
     let mut buf: Vec<u8> = Vec::with_capacity(1 << 20);
     let mut chunk = vec![0u8; 64 * 1024];
-    let mut frame_count: u64 = 0;
+    let mut frames: u64 = 0;
 
     loop {
         let n = stdout.read(&mut chunk).await?;
@@ -338,10 +369,11 @@ async fn pump_once(
         }
         buf.extend_from_slice(&chunk[..n]);
 
-        // Split Annex-B: emit every complete NAL unit except a trailing partial.
         loop {
             let Some(first) = find_start_code(&buf, 0) else { break };
-            let Some(next) = find_start_code(&buf, first + 3) else { break };
+            let Some(next) = find_start_code(&buf, first + 3) else {
+                break;
+            };
 
             let nal = buf[first..next].to_vec();
             buf.drain(..next);
@@ -355,15 +387,14 @@ async fn pump_once(
                         ..Default::default()
                     })
                     .await?;
-                frame_count += 1;
-                if frame_count % 60 == 1 {
-                    log::info!("sent {} NAL units", frame_count);
+                frames += 1;
+                if frames % 60 == 1 {
+                    log::info!("sent {} NAL units", frames);
                 }
             }
         }
 
         if buf.len() > 4 << 20 {
-            // Avoid unbounded growth if we ever fail to find a boundary.
             buf.clear();
         }
     }
@@ -388,7 +419,6 @@ fn find_start_code(buf: &[u8], from: usize) -> Option<usize> {
     None
 }
 
-/// Build the "soac" answer payload.
 pub fn answer_payload(meta: &SessionMeta, sdp: &str) -> Value {
     json!({
         "app_control_id": meta.app_control_id,
@@ -397,22 +427,4 @@ pub fn answer_payload(meta: &SessionMeta, sdp: &str) -> Value {
         "type": "answer",
         "ice_network_type": 3,
     })
-}
-
-pub fn candidate_payload(meta: &SessionMeta, cand: &str, mid: &str) -> Value {
-    json!({
-        "app_control_id": meta.app_control_id,
-        "ice_id": meta.ice_id,
-        "candidate": {
-            "candidate": cand,
-            "sdpMLineIndex": 0,
-            "sdpMid": mid,
-        },
-        "type": "candidate",
-    })
-}
-
-/// Forward one outbound soac payload through the signalling channel.
-pub fn push_soac(tx: &UnboundedSender<Value>, payload: Value) {
-    let _ = tx.send(payload);
 }
