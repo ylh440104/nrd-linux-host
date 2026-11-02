@@ -137,14 +137,15 @@ async fn publish_control(ctx: &mut Ctx, control_id: &str, fps: u32, size: &str) 
 
     let payload = json!({
         "app_control_id": control_id,
-        "app_data": {"_placeholder": true, "num": 0},
+        "app_data": {"num": 0},
         "geo_exit_ip": "",
         "geo_timezone": "Asia/Shanghai",
         "streamer_data": streamer.to_string(),
     });
 
-    // Sent as a binary attachment so it matches the official framing.
-    ctx.sig.emit_binary("control", payload).await?;
+    // Plain event: a "_placeholder" field would require a real binary
+    // attachment frame right after, otherwise the server closes the socket.
+    ctx.sig.emit("control", payload).await?;
     let _ = fps;
     Ok(())
 }
