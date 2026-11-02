@@ -87,7 +87,7 @@ async fn main() -> Result<()> {
 
     // 2. publish our capabilities; without this the device stays offline
     let control_id = uuid_like();
-    publish_control(&mut ctx, &control_id, fps, size).await?;
+    publish_control(&mut ctx, control_id.as_str(), fps, size).await?;
     println!("control sent, device should be online now");
 
     // keep the presence alive with engine.io pings
@@ -95,7 +95,7 @@ async fn main() -> Result<()> {
         match ctx.sig.next_event().await {
             Ok(Some((name, payload))) => {
                 log::info!("event {}", name);
-                if let Err(e) = handle(&mut ctx, &payload, &display, fps, &size).await {
+                if let Err(e) = handle(&mut ctx, payload, &display, fps, &size).await {
                     log::warn!("handle: {}", e);
                 }
             }
